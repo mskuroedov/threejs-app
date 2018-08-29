@@ -1,0 +1,364 @@
+<!DOCTYPE HTML>
+<html lang="en">
+
+<head>
+    <title>procedural terrain</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style type="text/css">
+        body {
+            background: #000;
+            color: #999;
+            padding: 0;
+            margin: 0;
+            overflow: hidden;
+        }
+
+    </style>
+</head>
+
+<body>
+    <script src="js/three.min.js"></script>
+    <script src="js/ImprovedNoise.js"></script>
+    <script src="js/Detector.js"></script>
+    <script src='js/shaders/CopyShader.js'></script>
+    <script src='js/postprocessing/EffectComposer.js'></script>
+    <script src='js/postprocessing/RenderPass.js'></script>
+    <script src='js/postprocessing/MaskPass.js'></script>
+    <script src='js/postprocessing/ShaderPass.js'></script>
+    <script src="js/shaders/DigitalGlitch.js"></script>
+    <script src='js/shaders/FilmShader.js'></script>
+    <script src='js/shaders/VerticalTiltShiftShader.js'></script>
+    <script src='js/shaders/HorizontalTiltShiftShader.js'></script>
+    <script src='js/shaders/VignetteShader.js'></script>
+    <script src="js/postprocessing/GlitchPass.js"></script>
+
+    <script>
+        if (!Detector.webgl) Detector.addGetWebGLMessage();
+
+        var SCREEN_WIDTH = window.innerWidth;
+        var SCREEN_HEIGHT = window.innerHeight;
+        var renderer, camera, scene, moverGroup, floorGeometry, floorMaterial, pointLight, pointLight2, pGeometry,shape;
+        var FLOOR_RES = 60;
+        var FLOOR_HT = 650;
+        var stepCount = 0;
+        var noiseScale = 9.5;
+        var noiseSeed = Math.random() * 1000;
+        var FLOOR_WIDTH = 3600;
+        var FLOOR_DEPTH = 4800;
+        var MOVE_SPD = 10;
+        var mouseX = 0;
+        var mouseY = 0;
+        var windowHalfX = window.innerWidth / 2;
+        var windowHalfY = window.innerHeight / 2;
+        var plane1;
+        var snoise = new ImprovedNoise();
+        var textureLoader = new THREE.TextureLoader();
+        var composer, shaderTime = 0,
+            filmPass, renderPass, copyPass, glitchPass, effectVignette,objects;
+        document.addEventListener('mousemove', onDocumentMouseMove, false);
+        document.addEventListener( 'mousedown', onDocumentMouseDown, false );
+
+        function onDocumentMouseMove(event) {
+            // mouseX = (event.clientX - (windowHalfX)) * 0.5;
+            // mouseY = (event.clientY - (windowHalfY)) * 0.5;
+        }
+        function onDocumentMouseDown( e ) {
+            var vectorMouse = new THREE.Vector3( //vector from camera to mouse
+                -(window.innerWidth/2-e.clientX)*2/window.innerWidth,
+                (window.innerHeight/2-e.clientY)*2/window.innerHeight,
+                -1/Math.tan(22.5*Math.PI/180)); //22.5 is half of camera frustum angle 45 degree
+            vectorMouse.applyQuaternion(camera.quaternion);
+            vectorMouse.normalize();
+
+            var vectorObject = new THREE.Vector3(); //vector from camera to object
+            vectorObject.set(plane1.x - camera.position.x,
+                plane1.y - camera.position.y,
+                plane1.z - camera.position.z);
+            vectorObject.normalize();
+            if (vectorMouse.angleTo(vectorObject)*180/Math.PI < 1) {
+              alert('fuck')
+
+            }
+        }
+        function params() {
+            var bluriness = 5;
+            hblur.uniforms['h'].value = bluriness / window.innerWidth;
+            vblur.uniforms['v'].value = bluriness / window.innerHeight;
+            hblur.uniforms['r'].value = vblur.uniforms['r'].value = 0.5;
+            filmPass.uniforms.grayscale.value = 0;
+            filmPass.uniforms['sCount'].value = 2;
+            filmPass.uniforms['sIntensity'].value = 0.2;
+            filmPass.uniforms['nIntensity'].value = 1;
+            effectVignette.uniforms["offset"].value = 1.0;
+            effectVignette.uniforms["darkness"].value = 1.3;
+        }
+
+        init();
+        animate();
+
+        function init() {
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 7000);
+            camera.position.z = 2750;
+
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x1c3c4a, 0.00045);
+
+            var hemisphereLight = new THREE.HemisphereLight(0xe3feff, 0xe6ddc8, 0.7);
+            scene.add(hemisphereLight);
+            hemisphereLight.position.y = 300;
+
+            //middle light
+            var centerLight = new THREE.SpotLight(0xb7f9ff, 1);
+            scene.add(centerLight);
+            centerLight.position.set(2500, 300, 2000);
+            centerLight.penumbra = 1;
+            centerLight.decay = 5;
+
+            pointLight = new THREE.PointLight(0xe07bff, 1.5);
+            pointLight.position.z = 200;
+            // scene.add(pointLight);
+
+            pointLight2 = new THREE.PointLight(0xff4e00, 1.2);
+            pointLight2.position.z = 200;
+            // scene.add(pointLight2);
+
+            var path = "img/";
+            var format = '.jpg';
+            var urls = [
+                path + 'px' + format, path + 'nx' + format,
+                path + 'py' + format, path + 'ny' + format,
+                path + 'pz' + format, path + 'nz' + format
+            ];
+
+            var reflectionCube = new THREE.CubeTextureLoader().load(urls);
+            reflectionCube.format = THREE.RGBFormat;
+
+            var cubeMaterial = new THREE.MeshPhongMaterial({
+                color: 0x447080,
+                envMap: reflectionCube,
+                combine: THREE.MixOperation,
+                side: THREE.DoubleSide,
+                reflectivity: 0.5,
+                shading: THREE.FlatShading
+            });
+
+            moverGroup = new THREE.Object3D();
+            scene.add(moverGroup);
+            var floorGroup = new THREE.Object3D();
+
+            var floorMaterial = new THREE.MeshPhongMaterial({
+                color: 0xffffff, //diffuse
+                side: THREE.DoubleSide,
+                blending: THREE.AdditiveBlending,
+                wireframe: true
+            });
+
+            //add extra x width
+            floorGeometry = new THREE.PlaneGeometry(FLOOR_WIDTH + 5000, FLOOR_DEPTH, FLOOR_RES, FLOOR_RES);
+            var floorMesh = new THREE.Mesh(floorGeometry, cubeMaterial);
+            var floorMesh2 = new THREE.Mesh(floorGeometry, floorMaterial);
+
+
+            floorMesh2.position.y = 20;
+            floorMesh2.position.z = 5;
+            floorGroup.add(floorMesh);
+            floorGroup.add(floorMesh2);
+            scene.add(floorGroup);
+            floorMesh.rotation.x = Math.PI / 1.65;
+            floorMesh2.rotation.x = Math.PI / 1.65;
+            floorGroup.position.y = 50;
+
+            //Particles
+            pGeometry = new THREE.Geometry();
+            sprite = textureLoader.load("https://s3-us-west-2.amazonaws.com/s.cdpn.io/95637/Smoke-Element.png");
+            for (i = 0; i < 2000; i++) {
+                var vertex = new THREE.Vector3();
+                vertex.x = 4000 * Math.random() - 2000;
+                vertex.y = -200 + Math.random() * 700;
+                vertex.z = 5000 * Math.random() - 2000;
+                pGeometry.vertices.push(vertex);
+            }
+            material = new THREE.PointsMaterial({
+                size: 10,
+                map: sprite,
+                transparent: true,
+                opacity: 0.75,
+                blending: THREE.AdditiveBlending,
+                alphaTest: 0.5
+            });
+
+//__________________________________________________________________________________
+
+            function createShape(scene,objects){
+                objects=[];
+                var Height = 30;
+                var rHeight=[];
+                var group = new THREE.Group();
+                for (let i = 1; i <= 20;i++){
+                    rHeight.push(Math.floor(Math.random() * 30) + 10  );
+                    objects.push(new THREE.Mesh(new THREE.ConeBufferGeometry( 10, rHeight[i-1], 7 ), new THREE.MeshLambertMaterial( { color: Math.random() * 0x000000,wireframe:false } )));
+                }
+                let rotateAngle ;
+                for (var i = 0; i < objects.length; i++) {
+                    rotateAngle = (Math.PI * 2 * (i)/objects.length);
+
+                    objects[i].rotation.x = rotateAngle;
+
+                    console.log(Math.PI * 2 * (i+1)/objects.length);
+
+                    // objects[i].rotation.z = Math.PI * 2 * (i)/objects.length;
+                    objects[i].position.y = Math.cos(Math.PI * 2 * (i) / objects.length)*20/2;
+                    objects[i].position.z = Math.sin(Math.PI * 2 * (i) / objects.length)*20/2;
+                    scene.add(objects[i]);
+                    group.add(objects[i]);
+                }
+
+                var group1 = group.clone();
+                group1.rotation.y += .75;
+                group1.rotation.z += .75;
+                var group2 = group1.clone();
+                group2.rotation.y +=.75;
+                group2.rotation.z += .75;
+                var group3 = group2.clone();
+                group3.rotation.y += .75;
+                group3.rotation.z += .75;
+                var group4 = group3.clone();
+                group4.rotation.y += .75;
+                group4.rotation.z += .75;
+                shape= new THREE.Group();
+                shape.add(group)
+                shape.add(group1)
+                shape.add(group2)
+                shape.add(group3)
+                shape.add(group4)
+                shape.position.set(150, 500, 1000);
+                shape.scale.set(15,15,15);
+                scene.add(shape);
+
+            }
+            console.log()
+            createShape(scene,objects);
+
+
+
+//__________________________________________________________________________________
+
+            var particles = new THREE.Points(pGeometry, material);
+            particles.sortParticles = true;
+            // moverGroup.add(particles);
+
+            //Logo
+            sprite = textureLoader.load("img/logo.png");
+            geometry = new THREE.PlaneBufferGeometry(500, 640, 1);
+            material = new THREE.MeshLambertMaterial({
+                transparent: true,
+                opacity: 1,
+                blending: THREE.AdditiveBlending,
+                map: sprite,
+                side: THREE.DoubleSide
+            });
+            plane1 = new THREE.Mesh(geometry, material);
+            plane1.position.set(1500, 500, 500);
+            // scene.add(plane1);
+
+            renderer = new THREE.WebGLRenderer({
+                antialias: true
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x1c3c4a);
+            document.body.appendChild(renderer.domElement);
+
+
+            //POST PROCESSING
+            //Create Shader Passes
+            renderPass = new THREE.RenderPass(scene, camera);
+            hblur = new THREE.ShaderPass(THREE.HorizontalTiltShiftShader);
+            vblur = new THREE.ShaderPass(THREE.VerticalTiltShiftShader);
+            effectVignette = new THREE.ShaderPass(THREE.VignetteShader);
+            copyPass = new THREE.ShaderPass(THREE.CopyShader);
+            filmPass = new THREE.ShaderPass(THREE.FilmShader);
+            glitchPass = new THREE.GlitchPass();
+
+            composer = new THREE.EffectComposer(renderer);
+            composer.addPass(renderPass);
+            // composer.addPass(hblur);
+            // composer.addPass(vblur);
+            composer.addPass(filmPass);
+            composer.addPass(effectVignette);
+            composer.addPass(glitchPass);
+            composer.addPass(copyPass);
+            copyPass.renderToScreen = true;
+
+            params();
+
+            setWaves();
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function setWaves() {
+            stepCount++;
+            moverGroup.position.z = -MOVE_SPD;
+            var i;
+            var ipos;
+            var offset = stepCount * MOVE_SPD / FLOOR_DEPTH * FLOOR_RES;
+
+            for (i = 0; i < FLOOR_RES + 1; i++) {
+                for (var j = 0; j < FLOOR_RES + 1; j++) {
+                    ipos = i + offset;
+                    if ((i > 30) || (j < 12) || (j > 48)) {
+                        floorGeometry.vertices[i * (FLOOR_RES + 1) + j].z = snoise.noise(ipos / FLOOR_RES * noiseScale, j / FLOOR_RES * noiseScale, noiseSeed) * FLOOR_HT;
+                    } else if (i > 25 && i < 30) {
+                        floorGeometry.vertices[i * (FLOOR_RES + 1) + j].z = snoise.noise(ipos / FLOOR_RES * noiseScale, j / FLOOR_RES * noiseScale, noiseSeed) * (FLOOR_HT / 1.2);
+                    } else {
+                        floorGeometry.vertices[i * (FLOOR_RES + 1) + j].z = snoise.noise(ipos / FLOOR_RES * noiseScale, j / FLOOR_RES * noiseScale, noiseSeed) * (FLOOR_HT / 2);
+                    }
+                }
+            }
+            floorGeometry.verticesNeedUpdate = true;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            render();
+        }
+
+        function render() {
+            var timer = -0.0002 * Date.now();
+
+            shape.rotation.z+=0.02
+            shape.rotation.y+=0.03
+            pointLight.position.x = 2400 * Math.cos(timer);
+            pointLight.position.z = 2400 * Math.sin(timer);
+
+            pointLight2.position.x = 1800 * Math.cos(-timer * 1.5);
+            pointLight2.position.z = 1800 * Math.sin(-timer * 1.5);
+
+            camera.position.x += (mouseX - camera.position.x) * .05;
+            camera.position.y += (-mouseY - camera.position.y) * .05;
+            camera.lookAt(scene.position);
+
+            for (i = 0; i < 2000; i++) {
+                pGeometry.vertices[i].z += 0.5;
+                if (pGeometry.vertices[i].z > 2700) {
+                    pGeometry.vertices[i].z = -2000;
+                }
+            }
+            pGeometry.verticesNeedUpdate = true;
+
+            setWaves();
+            composer.render(0.1);
+        }
+
+    </script>
+</body>
+
+</html>
